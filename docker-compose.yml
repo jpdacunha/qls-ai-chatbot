@@ -1,3 +1,4 @@
+name: "qls-ai-chatbot"
 services:
   liferay:
     image: liferay/dxp:2024.q3.7
@@ -8,10 +9,14 @@ services:
       - ./liferay/workspace/build/docker/client-extensions:/opt/liferay/osgi/client-extensions:ro
       - liferay_data:/opt/liferay/data
     depends_on:
-      database:
+      ollama:
         condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/c/portal/robots >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
   chatbot-backend:
     build:
       dockerfile: client-extensions/qls-ai-chatbot-etc-backend/Dockerfile
@@ -21,6 +26,8 @@ services:
     depends_on:
       liferay:
         condition: service_healthy
+    environment:
+      - SPRING_PROFILES_ACTIVE=${AI_CHATBOT_BACKEND_SPRING_PROFILES_ACTIVE:-localdocker}
   txtai:
     build:
       dockerfile: Dockerfile
@@ -28,7 +35,13 @@ services:
       args:
         TXTAI_TAG: ${TXTAI_TAG:-latest}
     ports:
-      - ${TXTAI_HOST_PORT:-8000}:8000
+      - ${TXTAI_HOST_PORT:-8001}:8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
   elasticsearch:
     build:
       dockerfile: elasticsearch/Dockerfile
@@ -41,6 +54,9 @@ services:
      - ${ELASTICSEARCH_HOST_PORT:-9200}:9200
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
+    depends_on:
+      database:
+        condition: service_healthy
   kibana:
     image: docker.elastic.co/kibana/kibana:8.15.2
     environment:
@@ -51,6 +67,12 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
   database:
     image: mysql:8
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
@@ -71,7 +93,31 @@ services:
       timeout: 2s
       retries: 5
       start_period: 10s
-
+    depends_on:
+      txtai:
+        condition: service_healthy
+  ollama:
+    build: 
+      context: .
+      dockerfile: ollama/ollama.Dockerfile
+    gpus: all
+    ports:
+      - ${OLLAMA_HOST_PORT:-11434}:11434
+    volumes:
+      - ollama_data:/root/.ollama/models
+    post_start:
+      - command: /home/ollama/install-models.sh
+        privileged: true
+    healthcheck:
+      test: ["CMD", "ollama", "list"]  # Check if Ollama is responding
+      interval: 10s                    # Run the health check every 10 seconds
+      timeout: 30s                     # Timeout for the health check is 30 seconds
+      retries: 5                       # Retry 5 times before marking it as unhealthy
+      start_period: 10s                # Wait 10 seconds before starting health checks
+    depends_on:
+      kibana:
+        condition: service_healthy
+    # GPU is required for this service in this environment.
 volumes:
   liferay_data:
   elasticsearch_data:
